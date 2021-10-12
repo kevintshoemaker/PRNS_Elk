@@ -1,0 +1,257 @@
+################
+# Additional analyses for Suzanne Macey nest fidelity paper
+################
+
+#######
+# Clear workspace
+#######
+
+rm(list=ls())
+
+options(scipen=999)
+
+#######
+# Load packages
+#######
+
+library(sp)
+library(raster)
+library(rgdal)
+library(rgeos)
+library(boot)
+
+#######
+# Load functions
+#######
+
+dist1 <- function(dat,lots){
+  dists <- numeric(lots)
+  nnests <- nrow(dat)
+  for(i in 1:lots){
+    randpair <- sample(1:nnests,2,replace=F)
+    dists[i] <- dist(dat[randpair,c("X_NAD83","Y_NAD83")])
+  }
+  return(dists)
+}
+
+patch1 <- function(dat,lots){
+  stay <- numeric(lots)
+  nnests <- nrow(dat)
+  for(i in 1:lots){
+    randpair <- sample(1:nnests,2,replace=F)
+    stay[i] <- diff(dat[randpair,]$Patch)==0
+  }
+  return(stay)
+}
+
+#######
+# Read in data
+#######
+
+allnests <- read.csv('Allnests.csv',header=T,stringsAsFactors = F)
+allnests$id2 <- as.factor(allnests$ID)
+
+ndx <- duplicated(allnests$ID)
+dup_ids <- unique(allnests$ID[ndx])
+alldups <- allnests[allnests$ID%in%dup_ids,]
+odr <- order(alldups$id2,alldups$Year)
+alldups <- alldups[odr,]
+
+
+
+######
+# Process data
+######
+
+proj <- CRS("+proj=utm +zone=18 +ellps=GRS80 +datum=NAD83 +units=m +no_defs")
+
+allsites <- unique(alldups$Site)
+
+allnests2 <- list()
+
+allregions <- list()
+
+for(site in allsites){
+  temp <- subset(allnests,Site==site)
+  allnests2[[site]] <- SpatialPointsDataFrame(coords = temp[,c("X_NAD83","Y_NAD83")] ,proj4string = proj,data=temp)
+  buf1 <- gBuffer(allnests2[[site]], width=10, byid=TRUE)
+  buf2 <- gUnaryUnion(buf1)
+  buf <-  sp::disaggregate(gBuffer(buf2, width=-5))
+  allregions[[site]] <- buf
+  allnests2[[site]]@data$Patch <- over(allnests2[[site]], allregions[[site]])
+}
+
+alldups$Patch <- sapply(1:nrow(alldups),function(t) over(SpatialPointsDataFrame(coords = alldups[t,c("X_NAD83","Y_NAD83")] ,proj4string = proj,data=alldups[t,]), allregions[[alldups$Site[t]]]))
+
+site<- allsites[5]
+plot(allnests2[[site]])
+plot(allregions[[site]],add=T,lwd=3)
+
+
+## question 1: are nest sites nearer together than expected by random chance?
+
+dup_dists <- sapply(1:length(dup_ids),function(i) as.numeric(dist(alldups[which(alldups$ID==dup_ids[i])[c(1,2)],c("X_NAD83","Y_NAD83")])))
+names(dup_dists) <- dup_ids
+
+dup_dists <- c(dup_dists,as.numeric(dist(alldups[which(alldups$ID=="WFP_L4R12")[c(2,3)],c("X_NAD83","Y_NAD83")])))
+names(dup_dists)[length(dup_dists)] <- "WFP_L4R12_2"
+dup_dists
+
+dup_sites <- substr(dup_ids,1,3)
+dup_sites <- c(dup_sites,"WFP")
+dup_sites
+
+site<- allsites[4]
+allnests2[[site]]
+target_stat <- mean(dup_dists)
+
+lots=10000
+
+boot=list()
+i=10
+for(i in 1:length(dup_dists)){
+  site <- dup_sites[i]
+  dat <- allnests2[[site]]@data
+  boot[[i]] <- dist1(dat,lots)
+}
+
+meanz <- numeric(lots)
+for(i in 1:lots){
+  meanz[i] <- mean(sapply(1:length(boot),function(t) sample(boot[[t]],1)))
+}
+
+p1 <- length(which(meanz<=target_stat))/lots
+p1
+
+svg(file="meanz1.svg",5,4)
+hist(meanz,xlim=c(0,140),xlab="Dist between successive nests",ylab="Proportion",freq=F,ylim=c(0,0.025),main="")
+lines(density(meanz),col=gray(0.4),lwd=3,lty=2)
+abline(v=target_stat,lwd=4,col="blue")
+text(45,0.023,sprintf("p-value: %s",p1))
+dev.off()
+
+
+## question 2: do they select the same patch more often than expected?
+
+i=1
+
+stays <- sapply(1:length(dup_ids),function(i) diff(alldups[which(alldups$ID==dup_ids[i])[c(1,2)],]$Patch)==0 )
+names(stays) <- dup_ids
+
+stays <- c(stays,diff(alldups[which(alldups$ID=="WFP_L4R12")[c(2,3)],]$Patch)==0)
+names(stays)[length(stays)] <- "WFP_L4R12_2"
+stays
+
+target_stat2 <- sum(stays)/length(stays)
+
+
+lots=10000
+
+boot=list()
+i=1
+for(i in 1:length(stays)){
+  site <- dup_sites[i]
+  dat <- allnests2[[site]]@data
+  boot[[i]] <- patch1(dat,lots)
+}
+
+meanz2 <- numeric(lots)
+for(i in 1:lots){
+  meanz2[i] <- sum(sapply(1:length(boot),function(t) sample(boot[[t]],1)))/length(boot)
+}
+
+p2 <- length(which(meanz2>=target_stat2))/lots
+p2
+
+svg(file="meanz2.svg",5,4)
+hist(meanz2,xlim=c(0,1),xlab="Proportion re-nesting in the same patch",ylab="Proportion",freq=F,ylim=c(0,4),main="",breaks=11) # 
+lines(density(meanz2,adjust=2.5),col=gray(0.4),lwd=3,lty=2)
+abline(v=target_stat2,lwd=4,col="blue")
+text(0.7,3.5,sprintf("p-value: %s",p2))
+dev.off()
+
+
+
+## question 3: do they select the same microsites within a patch?
+
+  ## for this one, let's exclude the "outlier"
+
+dup_dists <- sapply(1:length(dup_ids),function(i) as.numeric(dist(alldups[which(alldups$ID==dup_ids[i])[c(1,2)],c("X_NAD83","Y_NAD83")])))
+names(dup_dists) <- dup_ids
+
+patches <- sapply(1:length(dup_dists),function(t) alldups[which(alldups$ID==dup_ids[t])[1],]$Patch)
+
+dup_sites <- substr(dup_ids,1,3)
+
+site<- allsites[4]
+allnests2[[site]]
+target_stat <- mean(dup_dists)
+
+lots=10000
+
+boot=list()
+i=2
+for(i in 1:length(dup_dists)){
+  site <- dup_sites[i]
+  dat <- allnests2[[site]]@data[allnests2[[site]]@data$Patch==patches[i],]
+  boot[[i]] <- dist1(dat,lots)
+}
+
+meanz3 <- numeric(lots)
+for(i in 1:lots){
+  meanz3[i] <- mean(sapply(1:length(boot),function(t) sample(boot[[t]],1)))
+}
+
+p3 <- length(which(meanz3<=target_stat))/lots
+p3
+
+svg(file="meanz3.svg",5,4)
+hist(meanz3,xlim=c(0,22),xlab="Dist between successive nests in patch",ylab="Proportion",freq=F,ylim=c(0,0.25),main="")
+lines(density(meanz3),col=gray(0.4),lwd=3,lty=2)
+abline(v=target_stat,lwd=4,col="blue")
+text(12,0.23,sprintf("p-value: %s",p3))
+dev.off()
+
+
+
+
+#########
+# full figure
+
+svg(file="allboots2.svg",5,7)
+
+layout(matrix(c(1:3),nrow=3))
+
+hist(meanz,xlim=c(0,140),xlab="Distance between subsequent nests",ylab="Proportion",freq=F,ylim=c(0,0.025),main="")
+#lines(density(meanz),col=gray(0.4),lwd=3,lty=2)
+abline(v=target_stat,lwd=4,col="black")
+text(45,0.023,sprintf("p-value: %.3f",p1))
+text(0,0.022,"a)",cex=2)
+
+hist(meanz2,xlim=c(0,1),xlab="Proportion re-nesting in the same patch",ylab="Proportion",freq=F,ylim=c(0,4),main="",breaks=11) # 
+#lines(density(meanz2,adjust=2.5),col=gray(0.4),lwd=3,lty=2)
+abline(v=target_stat2,lwd=4,col="black")
+text(0.7,3.5,sprintf("p-value: %.3f",p2))
+text(0,3.5,"b)",cex=2)
+
+hist(meanz3,xlim=c(0,25),xlab="Distance between subsequent nests in patch",ylab="Proportion",freq=F,ylim=c(0,0.25),main="")
+#lines(density(meanz3),col=gray(0.4),lwd=3,lty=2)
+abline(v=target_stat,lwd=4,col="black")
+text(12,0.23,sprintf("p-value: %.3f",p3))
+text(0,0.22,"c)",cex=2)
+
+dev.off()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
